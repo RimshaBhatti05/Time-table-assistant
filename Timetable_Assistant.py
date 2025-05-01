@@ -2,145 +2,170 @@ import streamlit as st
 import pandas as pd
 from io import BytesIO
 
-st.set_page_config(page_title="Timetable Assistant", layout="centered")
+# —————————————————————————
+# Utility functions
+# —————————————————————————
 
-# Initialize the step counter
+def reset_app():
+    for key in st.session_state.keys():
+        del st.session_state[key]
+    st.experimental_rerun()
+
+def create_empty_timetable(classes, days, periods):
+    # Returns a dict of class → DataFrame(day × period)
+    tables = {}
+    for cls in classes:
+        df = pd.DataFrame("", index=days, columns=periods)
+        tables[cls] = df
+    return tables
+
+def to_excel_bytes(tables):
+    output = BytesIO()
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        for cls, df in tables.items():
+            df.to_excel(writer, sheet_name=cls)
+    output.seek(0)
+    return output.read()
+
+# —————————————————————————
+# App setup
+# —————————————————————————
+
+st.set_page_config(page_title="Timetable Assistant", layout="centered")
+st.title("📅 School Timetable Assistant")
+
+# Initialize session state
 if "step" not in st.session_state:
     st.session_state.step = 0
     st.session_state.name = ""
     st.session_state.classes = []
     st.session_state.teachers = []
-    st.session_state.incharge = ""
-    st.session_state.timetable = None
+    st.session_state.incharges = {}
+    st.session_state.timetable = {}
 
 def next_step():
     st.session_state.step += 1
 
-# Step 0: Enter Name
+# —————————————————————————
+# Step 0: Get user name
+# —————————————————————————
 if st.session_state.step == 0:
-    st.title("📅 Timetable Assistant")
-    st.subheader("👋 Hello! What's your name?")
-    st.session_state.name = st.text_input("Your Name")
+    st.subheader("👋 What’s your name?")
+    st.session_state.name = st.text_input("Enter your name")
     if st.button("Next"):
-        if st.session_state.name.strip() != "":
+        if st.session_state.name.strip():
             next_step()
         else:
             st.error("Please enter your name.")
 
-# Step 1: Enter Classes & Sections
+# —————————————————————————
+# Step 1: Enter classes
+# —————————————————————————
 elif st.session_state.step == 1:
-    st.subheader(f"Hi {st.session_state.name}! Enter your classes & sections")
-    classes_input = st.text_area("Comma-separate each class-section (e.g. 5th Pink, 6th Red)")
+    st.subheader(f"Hello, {st.session_state.name}! Enter your classes/sections:")
+    classes_txt = st.text_area("Comma-separated (e.g., 5th Pink, 6th Red)")
     if st.button("Next"):
-        items = [c.strip() for c in classes_input.split(",") if c.strip()]
-        if items:
-            st.session_state.classes = items
+        cls = [c.strip() for c in classes_txt.split(",") if c.strip()]
+        if cls:
+            st.session_state.classes = cls
             next_step()
         else:
-            st.error("Please enter at least one class-section.")
+            st.error("Enter at least one class.")
 
-# Step 2: Add Teachers
+# —————————————————————————
+# Step 2: Add teachers
+# —————————————————————————
 elif st.session_state.step == 2:
-    st.subheader("➕ Add Teachers")
+    st.subheader("➕ Add Teachers (one at a time)")
     with st.form("teacher_form", clear_on_submit=True):
-        tname = st.text_input("Teacher Name")
-        ttype = st.selectbox("Type", ["Full-time (9 lectures incl. 2 free)", "Visiting (≤5 lectures)"])
-        tsubs = st.text_input("Subjects (comma-separated)")
-        tsecs = st.multiselect("Which of your classes?", st.session_state.classes)
-        submitted = st.form_submit_button("Add this Teacher")
+        name = st.text_input("Teacher Name")
+        ttype = st.radio("Type", ["Full-time (9 lect, 2 free)", "Visiting (≤5 lect)"])
+        subjects = st.text_input("Subject(s) (comma-separated)")
+        secs = st.multiselect("Which classes?", st.session_state.classes)
+        submitted = st.form_submit_button("Add Teacher")
         if submitted:
-            if not (tname and tsubs and tsecs):
-                st.error("Fill out all fields.")
+            if not (name and subjects and secs):
+                st.error("Fill all fields.")
             else:
                 st.session_state.teachers.append({
-                    "name": tname,
+                    "name": name,
                     "type": ttype,
-                    "subjects": [s.strip() for s in tsubs.split(",")],
-                    "sections": tsecs
+                    "subjects": [s.strip() for s in subjects.split(",")],
+                    "sections": secs
                 })
-                st.success(f"Added {tname}")
-
+                st.success(f"Added {name}")
     if st.session_state.teachers:
         st.write("**Teachers so far:**")
-        df = pd.DataFrame(st.session_state.teachers)
-        st.dataframe(df, height=200)
-
-    if st.button("Next: Assign In-charge"):
+        df_t = pd.DataFrame(st.session_state.teachers)
+        st.dataframe(df_t, height=200)
+    if st.button("Next"):
         if st.session_state.teachers:
             next_step()
         else:
             st.error("Add at least one teacher.")
 
-# Step 3: Select In-charge Teacher for First Lecture
+# —————————————————————————
+# Step 3: Assign in-charges
+# —————————————————————————
 elif st.session_state.step == 3:
-    st.subheader("👩‍🏫 Choose In-charge for First Lecture of Each Class")
-    incharge_map = {}
+    st.subheader("👩‍🏫 Assign In-charge for first lecture")
     for cls in st.session_state.classes:
-        # Filter teachers who teach this class
-        options = [t["name"] for t in st.session_state.teachers if cls in t["sections"]]
-        if options:
-            incharge_map[cls] = st.selectbox(f"{cls} In-charge:", options, key=cls)
-        else:
-            st.warning(f"No teacher assigned to {cls} yet.")
-
-    if st.button("Next: Generate Timetable"):
-        st.session_state.incharge = incharge_map
+        opts = [t["name"] for t in st.session_state.teachers if cls in t["sections"]]
+        st.session_state.incharges[cls] = st.selectbox(f"In-charge for {cls}", opts, key=cls)
+    if st.button("Next"):
         next_step()
 
-# Step 4: Generate and Display Timetable
+# —————————————————————————
+# Step 4: Generate timetable
+# —————————————————————————
 elif st.session_state.step == 4:
-    st.subheader("📊 Generated Timetable")
+    st.subheader("📊 Generating Timetable…")
+    days = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"]
+    periods = [f"P{p}" for p in range(1, 8)]  # 7 periods/day
 
-    days = ["Mon","Tue","Wed","Thu","Fri","Sat"]
-    periods = [f"P{i+1}" for i in range(7)]
-    # Build an empty structure
-    timetable = {}
-    for cls in st.session_state.classes:
-        df = pd.DataFrame("", index=days, columns=periods)
-        # First lecture is in-charge
+    # Create empty tables
+    tables = create_empty_timetable(st.session_state.classes, days, periods)
+
+    # Fill in-charge in period 1
+    for cls, teacher in st.session_state.incharges.items():
         for d in days:
-            df.at[d, "P1"] = st.session_state.incharge.get(cls, "")
-        timetable[cls] = df
+            tables[cls].at[d, "P1"] = teacher
 
-    # Auto-allocate other lectures
+    # Allocate other lectures
     for t in st.session_state.teachers:
         max_lec = 9 if "Full-time" in t["type"] else 5
         free = 2 if "Full-time" in t["type"] else 0
-        assignable = max_lec - free
+        slots = max_lec - free
         for cls in t["sections"]:
-            df = timetable[cls]
+            df = tables[cls]
             placed = 0
             for d in days:
                 for p in periods[1:]:
-                    if placed >= assignable:
+                    if placed >= slots:
                         break
                     if df.at[d, p] == "":
                         df.at[d, p] = t["name"]
                         placed += 1
-                if placed >= assignable:
+                if placed >= slots:
                     break
 
-    # Store and display
-    st.session_state.timetable = timetable
-    for cls, df in timetable.items():
+    st.session_state.timetable = tables
+
+    # Display & download
+    for cls, df in tables.items():
         st.markdown(f"### 🏫 {cls}")
-        st.dataframe(df)
+        st.dataframe(df, height=300)
 
-    # Download as Excel
-    def to_excel(dfs):
-        bio = BytesIO()
-        with pd.ExcelWriter(bio, engine="xlsxwriter") as writer:
-            for cls, df in dfs.items():
-                df.to_excel(writer, sheet_name=cls)
-        return bio.getvalue()
-
-    excel_data = to_excel(st.session_state.timetable)
-    st.download_button("⬇️ Download All as Excel", data=excel_data,
-                       file_name="timetable.xlsx", mime="application/vnd.ms-excel")
+    excel_bytes = to_excel_bytes(tables)
+    st.download_button(
+        "⬇️ Download Excel",
+        data=excel_bytes,
+        file_name="timetable.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
 
     if st.button("🔁 Start Over"):
-        for k in list(st.session_state.keys()):
-            del st.session_state[k]
-        st.experimental_rerun()
+        reset_app()
+
 
 
